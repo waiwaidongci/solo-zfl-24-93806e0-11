@@ -18,3 +18,9 @@ coverage/
 .DS_Store
 .idea/
 .vscode/
+
+data/*.db
+data/*.db-wal
+data/*.db-shm
+.syslibs/
+e2e/shots/

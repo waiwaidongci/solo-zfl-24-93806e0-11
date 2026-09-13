@@ -1,9 +1,51 @@
-# 赛鸽血统环号登记站
+# 赛鸽血统环号登记站 · 在线拍卖
 
 运行：
 
 ```bash
+npm install
 npm start
 ```
 
-访问`http://localhost:3024`。支持档案、血统查询、转让和归巢成绩记录。
+访问 `http://localhost:3024`。支持档案、血统查询、转让、归巢成绩记录，以及完整的在线拍卖。
+
+## 在线拍卖
+
+- **建场次（管理员）**：设置开拍/截拍时间、加价幅度、佣金比例。
+- **上架拍品**：仅允许已登记鸽只，且送拍人必须与当前鸽主一致；同一鸽只在同一场次只能上架一次。
+- **买家登记**：登记并缴纳保证金后才能出价；重复登记幂等，不重复收款。
+- **出价规则**：仅在进行中的场次可出价；首口不得低于起拍价，其后不得低于「当前最高价 + 加价幅度」；卖家不能对自己的拍品出价。
+- **自动顺延**：截拍前 2 分钟内的出价，自动把该拍品截拍时间顺延到出价时刻 + 2 分钟。
+- **截拍**：到点后截拍，只确定一个最高价（同价先出者优先）；无出价则流拍；重复/并发截拍幂等，结果唯一。
+- **结算**：成交收取佣金（成交价 × 佣金比例），卖方所得 = 成交价 − 佣金；成交者保证金冲抵货款，未成交者保证金退还；成交后鸽只所有权自动转移给买受人。结算整体幂等，重复/并发执行不会重复扣款。
+
+## 可靠性设计
+
+- 存储使用 SQLite（WAL 模式），所有多步写入都包在 `IMMEDIATE` 事务中：任一规则校验失败即整体回滚，不留半笔记录。
+- 资金流水 `ledger.entry_key` 唯一约束是幂等底线：重复结算只会撞上已存在的键，不会重复扣款。
+- 出价、顺延、截拍、结算均在单事务内完成，并发请求由事务串行化，并发截拍只会产生一个成交价。
+- 重启后数据完整可查（`data/auction.db`）。
+
+## 测试
+
+```bash
+npm test        # 边界 + 并发单元测试（node:test，16 项）
+npm run e2e     # 真实浏览器全流程走查（Playwright：建场→上架→登记→出价→顺延→并发截拍→结算→重启验证）
+```
+
+E2E 截图输出在 `e2e/shots/`。
+
+## API 一览
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET/POST | `/api/pigeons` | 鸽只档案列表 / 新建 |
+| GET | `/api/pigeons/:ring/relation` | 血统查询 |
+| POST | `/api/pigeons/:ring/transfers|races|vaccines` | 转让 / 成绩 / 免疫 |
+| GET/POST | `/api/auction/sessions` | 场次列表 / 建场次 |
+| GET | `/api/auction/sessions/:id` | 场次详情（拍品、出价、买家、流水） |
+| POST | `/api/auction/sessions/:id/lots` | 上架拍品 |
+| POST | `/api/auction/sessions/:id/buyers` | 买家登记缴保证金 |
+| POST | `/api/auction/lots/:id/bids` | 出价 |
+| POST | `/api/auction/lots/:id/close` · `/api/auction/sessions/:id/close` | 截拍 |
+| POST | `/api/auction/sessions/:id/settle` | 结算 |

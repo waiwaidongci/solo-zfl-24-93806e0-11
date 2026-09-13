@@ -4,6 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/",
+    "e2e": "node e2e/walkthrough.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1"
   }
 }
