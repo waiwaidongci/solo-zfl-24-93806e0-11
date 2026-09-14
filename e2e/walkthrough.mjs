@@ -43,9 +43,14 @@ async function api(path, options) {
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const toLocalInput = ms => {
-  const d = new Date(ms); const pad = n => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const CN_OFFSET = 8 * 3600 * 1000;
+const fmtCn = ms => { // 与页面/服务端同一口径：北京时间 UTC+8
+  const d = new Date(ms + CN_OFFSET); const p = n => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+};
+const toLocalInput = ms => { // 页面表单按北京时间解释，填 UTC+8 墙钟
+  const d = new Date(ms + CN_OFFSET); const p = n => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}T${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
 };
 
 async function clearToast(page) {
@@ -199,6 +204,18 @@ async function main() {
   await page.click("#close-session-btn");
   await expectToast(page, "未到截拍时间");
   ok("界面提示「未到截拍时间」而非假成功");
+
+  // 时区一致性：提示里的时间、页面拍品行的截拍时间、实际截拍时刻的北京时间三者必须一致
+  const toastText = await page.textContent("#flash");
+  const timeMatch = toastText.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+  assert.ok(timeMatch, "错误提示应包含具体截拍时间");
+  const shownInToast = timeMatch[1];
+  const lotRowText = await page.textContent(`[data-lot-row="${lot1.id}"]`);
+  assert.ok(lotRowText.includes(`截拍 ${shownInToast}`), `页面截拍时间应与提示一致（${shownInToast}），实际行：${lotRowText}`);
+  assert.equal(shownInToast, fmtCn(extended.endsAt), "提示时间应等于实际截拍时刻的北京时间");
+  assert.ok(toastText.includes("UTC+8"), "提示应说明时区含义");
+  await page.waitForSelector("text=北京时间", { timeout: 8000 });
+  ok(`错误提示时间与页面一致（${shownInToast} 北京时间 UTC+8），服务进程时区：${process.env.TZ || "系统默认"}`);
   const rawClose = await fetch(`${BASE}/api/auction/sessions/${sessionId}/close`, { method: "POST" });
   assert.equal(rawClose.status, 409, "存在未到点拍品时接口应返回 409");
   const rawBody = await rawClose.json();

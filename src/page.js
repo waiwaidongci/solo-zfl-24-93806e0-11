@@ -81,8 +81,8 @@ export const page = `<!doctype html>
           <form id="session-form">
             <h2>建场次（管理员）</h2>
             <label>场次名称</label><input name="name" required placeholder="如：2026 秋季精品赛鸽专场">
-            <label>开拍时间</label><input name="startAt" type="datetime-local" required>
-            <label>截拍时间</label><input name="endAt" type="datetime-local" required>
+            <label>开拍时间（北京时间 UTC+8）</label><input name="startAt" type="datetime-local" required>
+            <label>截拍时间（北京时间 UTC+8）</label><input name="endAt" type="datetime-local" required>
             <label>加价幅度（元）</label><input name="increment" type="number" min="1" step="1" value="100" required>
             <label>佣金比例（%）</label><input name="commissionPct" type="number" min="0" max="99" step="0.1" value="5" required>
             <button id="create-session-btn">创建场次</button>
@@ -130,7 +130,13 @@ export const page = `<!doctype html>
       if (!res.ok) { const err = new Error(data.message || data.error || "请求失败"); err.code = data.error; throw err; }
       return data;
     }
-    const fmtTime = ms => ms ? new Date(ms).toLocaleString("zh-CN", { hour12:false }) : "-";
+    // 全站时间统一按北京时间（UTC+8）呈现：固定 +8 偏移换算，与浏览器/服务器所在时区无关
+    const CN_OFFSET = 8 * 3600 * 1000;
+    function fmtCn(ms) {
+      const d = new Date(ms + CN_OFFSET); const p = n => String(n).padStart(2, "0");
+      return d.getUTCFullYear()+"-"+p(d.getUTCMonth()+1)+"-"+p(d.getUTCDate())+" "+p(d.getUTCHours())+":"+p(d.getUTCMinutes())+":"+p(d.getUTCSeconds());
+    }
+    const fmtTime = ms => ms ? fmtCn(ms) : "-";
     const fmtMoney = n => n == null ? "-" : n.toLocaleString("zh-CN") + " 元";
     const phaseText = { scheduled:"未开拍", live:"进行中", ended:"已结束" };
     const lotStatusText = { open:"竞价中", sold:"已成交", unsold:"已流拍" };
@@ -181,17 +187,18 @@ export const page = `<!doctype html>
     }
     $("#lot-pigeon").onchange = syncConsignor;
 
-    function toLocalInput(ms) {
-      const d = new Date(ms); const pad = n => String(n).padStart(2, "0");
-      return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+"T"+pad(d.getHours())+":"+pad(d.getMinutes());
+    function toLocalInput(ms) { // datetime-local 填北京时间墙钟
+      const d = new Date(ms + CN_OFFSET); const pad = n => String(n).padStart(2, "0");
+      return d.getUTCFullYear()+"-"+pad(d.getUTCMonth()+1)+"-"+pad(d.getUTCDate())+"T"+pad(d.getUTCHours())+":"+pad(d.getUTCMinutes());
     }
+    const parseCnInput = v => new Date(v + ":00+08:00").getTime(); // 表单时间按北京时间解释
 
     $("#session-form").onsubmit = async event => {
       event.preventDefault();
       const f = new FormData(event.target);
       try {
         const created = await api("/api/auction/sessions", { method:"POST", body: JSON.stringify({
-          name: f.get("name"), startAt: new Date(f.get("startAt")).getTime(), endAt: new Date(f.get("endAt")).getTime(),
+          name: f.get("name"), startAt: parseCnInput(f.get("startAt")), endAt: parseCnInput(f.get("endAt")),
           increment: Number(f.get("increment")), commissionRate: Number(f.get("commissionPct")) / 100
         }) });
         toast("场次已创建");
@@ -281,7 +288,7 @@ export const page = `<!doctype html>
 
       sessionDetail.innerHTML =
         '<h2>'+v.name+' <span class="pill '+v.phase+'">'+phaseText[v.phase]+'</span></h2>'+
-        '<div class="meta">开拍 '+fmtTime(v.startAt)+' · 截拍 '+fmtTime(v.endAt)+' · 加价幅度 '+fmtMoney(v.increment)+' · 佣金 '+(v.commissionRate*100).toFixed(1)+'% · 截拍前 2 分钟内出价自动顺延 2 分钟</div>'+
+        '<div class="meta">开拍 '+fmtTime(v.startAt)+' · 截拍 '+fmtTime(v.endAt)+' · 加价幅度 '+fmtMoney(v.increment)+' · 佣金 '+(v.commissionRate*100).toFixed(1)+'% · 截拍前 2 分钟内出价自动顺延 2 分钟 · 时间均为北京时间（UTC+8）</div>'+
         '<div class="section"><button class="warn" id="close-session-btn" data-close-session="'+v.id+'">截拍到点拍品</button> '+
         '<button id="settle-session-btn" data-settle-session="'+v.id+'">结算（佣金 + 保证金）</button> '+
         '<button class="ghost" id="refresh-session-btn">刷新</button></div>'+

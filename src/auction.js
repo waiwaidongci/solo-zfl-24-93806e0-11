@@ -20,11 +20,23 @@ function assertInt(value, code, message) {
   if (!Number.isInteger(value)) throw new AuctionError(code, message, 400);
 }
 
-/** 服务器本地时间格式化（用于错误提示，与前端展示一致） */
+/**
+ * 展示时间标准：北京时间 UTC+8。
+ * 用固定 +8 偏移换算（中国自 1991 年起无夏令时），不读取进程时区——
+ * 无论服务运行在 UTC、美东还是任何时区，同一时刻都格式化为同一串时间。
+ */
+export const DISPLAY_TZ_LABEL = "北京时间 UTC+8";
+const CN_OFFSET_MS = 8 * 60 * 60 * 1000;
+
 export function fmtCn(ms) {
-  const d = new Date(ms);
+  const d = new Date(ms + CN_OFFSET_MS);
   const p = n => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+}
+
+/** 北京时间口径的日期（用于转让记录等纯日期字段） */
+export function cnDate(ms) {
+  return fmtCn(ms).slice(0, 10);
 }
 
 const getSessionStmt = (db) => db.prepare("SELECT * FROM sessions WHERE id = ?");
@@ -164,7 +176,7 @@ export const placeBid = (db, input, now) => {
 
 function closeLotInTx(db, lot, now) {
   if (lot.status !== "open") return { lot, changed: false }; // 已截拍 -> 幂等返回
-  if (now < lot.ends_at) throw new AuctionError("close_not_due", `拍品 ${lot.ring_no} 未到截拍时间（${fmtCn(lot.ends_at)}）`, 409);
+  if (now < lot.ends_at) throw new AuctionError("close_not_due", `拍品 ${lot.ring_no} 未到截拍时间（${fmtCn(lot.ends_at)} ${DISPLAY_TZ_LABEL}）`, 409);
   const winning = db.prepare(`SELECT b.*, u.name AS buyer_name FROM bids b
                               JOIN buyers u ON u.id = b.buyer_id
                               WHERE b.lot_id = ? ORDER BY b.amount DESC, b.id ASC LIMIT 1`).get(lot.id);
@@ -218,7 +230,7 @@ export const closeSession = (db, sessionId, now) => {
   }).immediate();
 
   if (summary.pending.length > 0) {
-    const pendingText = summary.pending.map(l => `${l.ringNo}（截拍时间 ${fmtCn(l.endsAt)}）`).join("、");
+    const pendingText = summary.pending.map(l => `${l.ringNo}（截拍时间 ${fmtCn(l.endsAt)} ${DISPLAY_TZ_LABEL}）`).join("、");
     const closedText = summary.closed.length ? `已截拍 ${summary.closed.length} 件；` : "";
     throw new AuctionError("lots_not_due",
       `${closedText}${summary.pending.length} 件拍品未到截拍时间：${pendingText}`, 409, summary);
@@ -264,7 +276,7 @@ export const settleSession = (db, sessionId, now) => {
         // 成交后鸽只所有权转移给买受人（与结算同事务，只做一次）
         const pigeon = db.prepare("SELECT * FROM pigeons WHERE ring_no = ?").get(lot.ring_no);
         const transfers = JSON.parse(pigeon.transfers);
-        transfers.push({ date: new Date(now).toISOString().slice(0, 10), from: lot.consignor, to: winner.name, note: `拍卖成交（场次 ${session.name}，成交价 ${lot.hammer_price}）` });
+        transfers.push({ date: cnDate(now), from: lot.consignor, to: winner.name, note: `拍卖成交（场次 ${session.name}，成交价 ${lot.hammer_price}）` });
         db.prepare("UPDATE pigeons SET owner = ?, transfers = ? WHERE ring_no = ?")
           .run(winner.name, JSON.stringify(transfers), lot.ring_no);
       }

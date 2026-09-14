@@ -4,7 +4,7 @@ import {
 } from "./db.js";
 import {
   AuctionError, createSession, listLot, registerBuyer, placeBid,
-  closeLot, closeSession, settleSession, getSessionView, listSessions
+  closeLot, closeSession, settleSession, getSessionView, listSessions, cnDate
 } from "./auction.js";
 import { page } from "./page.js";
 
@@ -24,7 +24,7 @@ export function createApp(db, now = () => Date.now()) {
     try {
       const url = new URL(req.url, `http://${req.headers.host}`);
       const path = url.pathname;
-      const today = () => new Date(now()).toISOString().slice(0, 10);
+      const today = () => cnDate(now()); // 纯日期字段同样按北京时间口径
 
       if (req.method === "GET" && path === "/") {
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });

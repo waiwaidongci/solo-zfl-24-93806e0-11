@@ -6,7 +6,7 @@ import { rmSync } from "node:fs";
 import { openDb, createPigeon, getPigeon } from "../src/db.js";
 import {
   EXTENSION_MS, createSession, listLot, registerBuyer, placeBid,
-  closeLot, closeSession, settleSession, getSessionView, listSessions
+  closeLot, closeSession, settleSession, getSessionView, listSessions, fmtCn
 } from "../src/auction.js";
 import { createApp } from "../src/app.js";
 
@@ -347,6 +347,33 @@ test("截拍：部分到点 -> 到点的截拍、未到点的明确反馈（HTTP
     assert.equal(view.lots.every(l => l.status !== "open"), true);
   } finally {
     server2.close();
+  }
+});
+
+/* ================= 时区 ================= */
+
+test("时区：截拍提示按北京时间（UTC+8）呈现，与服务进程时区无关", () => {
+  const db = freshDb();
+  const { lot } = setupLive(db);
+  const endsAt = T0 + 600_000;
+  const expected = fmtCn(endsAt);
+
+  const err = expectError(() => closeLot(db, lot.id, T0 + 599_999), "close_not_due");
+  assert.ok(err.message.includes(expected), `提示应包含北京时间 ${expected}，实际：${err.message}`);
+  assert.ok(err.message.includes("UTC+8"), "提示应说明时区含义");
+
+  // 已知时刻校验：UTC 2027-01-15 16:00:00 即北京时间 2027-01-16 00:00:00
+  assert.equal(fmtCn(Date.UTC(2027, 0, 15, 16, 0, 0)), "2027-01-16 00:00:00");
+
+  // 切换进程时区后，同一截拍时刻的提示时间不变
+  const oldTz = process.env.TZ;
+  process.env.TZ = "America/New_York";
+  try {
+    assert.equal(fmtCn(endsAt), expected, "进程时区不影响格式化结果");
+    const err2 = expectError(() => closeLot(db, lot.id, T0 + 599_999), "close_not_due");
+    assert.ok(err2.message.includes(expected), "美东时区下提示仍是同一北京时间");
+  } finally {
+    process.env.TZ = oldTz;
   }
 });
 
