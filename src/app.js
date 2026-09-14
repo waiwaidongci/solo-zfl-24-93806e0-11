@@ -81,7 +81,7 @@ export function createApp(db, now = () => Date.now()) {
       sendJson(res, 404, { error: "not_found" });
     } catch (error) {
       if (error instanceof AuctionError) {
-        return sendJson(res, error.status, { error: error.code, message: error.message });
+        return sendJson(res, error.status, { error: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) });
       }
       if (String(error.code || "").startsWith("SQLITE_CONSTRAINT")) {
         return sendJson(res, 409, { error: "conflict", message: error.message });

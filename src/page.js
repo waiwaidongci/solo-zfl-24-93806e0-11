@@ -312,9 +312,15 @@ export const page = `<!doctype html>
     async function closeSession(id) {
       try {
         const view = await api('/api/auction/sessions/'+id+'/close', { method:"POST" });
-        toast("截拍完成");
+        const s = view.closeSummary;
+        const sold = s ? s.closed.filter(c => c.status === "sold").length : 0;
+        const unsold = s ? s.closed.filter(c => c.status === "unsold").length : 0;
+        toast(s && s.closed.length ? "截拍完成：成交 " + sold + " 件 / 流拍 " + unsold + " 件" : "截拍完成：没有新的到点拍品");
         renderSessionView(view); await loadSessions();
-      } catch (e) { toast(e.message, true); }
+      } catch (e) {
+        toast(e.message, true); // 未到点的拍品给出明确未完成反馈
+        await loadSessions(); await loadSessionView(); // 到点的拍品可能已截拍，刷新视图
+      }
     }
     async function settleSession(id) {
       try {

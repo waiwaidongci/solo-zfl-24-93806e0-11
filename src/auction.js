@@ -8,15 +8,23 @@
 export const EXTENSION_MS = 2 * 60 * 1000; // 截拍前两分钟内出价自动顺延 2 分钟
 
 export class AuctionError extends Error {
-  constructor(code, message, status = 400) {
+  constructor(code, message, status = 400, details = undefined) {
     super(message);
     this.code = code;
     this.status = status;
+    this.details = details;
   }
 }
 
 function assertInt(value, code, message) {
   if (!Number.isInteger(value)) throw new AuctionError(code, message, 400);
+}
+
+/** 服务器本地时间格式化（用于错误提示，与前端展示一致） */
+export function fmtCn(ms) {
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 const getSessionStmt = (db) => db.prepare("SELECT * FROM sessions WHERE id = ?");
@@ -156,7 +164,7 @@ export const placeBid = (db, input, now) => {
 
 function closeLotInTx(db, lot, now) {
   if (lot.status !== "open") return { lot, changed: false }; // 已截拍 -> 幂等返回
-  if (now < lot.ends_at) throw new AuctionError("close_not_due", `未到截拍时间（${new Date(lot.ends_at).toISOString()}）`, 409);
+  if (now < lot.ends_at) throw new AuctionError("close_not_due", `拍品 ${lot.ring_no} 未到截拍时间（${fmtCn(lot.ends_at)}）`, 409);
   const winning = db.prepare(`SELECT b.*, u.name AS buyer_name FROM bids b
                               JOIN buyers u ON u.id = b.buyer_id
                               WHERE b.lot_id = ? ORDER BY b.amount DESC, b.id ASC LIMIT 1`).get(lot.id);
@@ -174,20 +182,48 @@ export const closeLot = (db, lotId, now) => {
   return tx.immediate();
 };
 
+function lotSummary(lot, winnerName = null) {
+  return {
+    lotId: lot.id,
+    ringNo: lot.ring_no,
+    status: lot.status,
+    hammerPrice: lot.hammer_price,
+    winner: winnerName,
+    endsAt: lot.ends_at
+  };
+}
+
+/**
+ * 批量截拍：到点的拍品照常截拍并提交；仍有未到点拍品时抛出 409 lots_not_due，
+ * details 里带 closed / pending 明细——只有真正完成截拍的拍品才出现在成功结果里。
+ */
 export const closeSession = (db, sessionId, now) => {
-  const tx = db.transaction(() => {
+  const summary = db.transaction(() => {
     getSession(db, sessionId);
     const lots = db.prepare("SELECT * FROM lots WHERE session_id = ? ORDER BY id").all(sessionId);
-    const results = [];
+    const closed = [], pending = [], alreadyClosed = [];
     for (const lot of lots) {
-      if (lot.status !== "open") { results.push({ lot, changed: false }); continue; }
-      if (now < lot.ends_at) { results.push({ lot, changed: false, pending: true }); continue; }
-      results.push(closeLotInTx(db, lot, now));
+      if (lot.status !== "open") {
+        const winner = lot.winner_buyer_id ? db.prepare("SELECT name FROM buyers WHERE id = ?").get(lot.winner_buyer_id)?.name : null;
+        alreadyClosed.push(lotSummary(lot, winner));
+        continue;
+      }
+      if (now < lot.ends_at) { pending.push(lotSummary(lot)); continue; }
+      closeLotInTx(db, lot, now);
+      const fresh = getLot(db, lot.id);
+      const winner = fresh.winner_buyer_id ? db.prepare("SELECT name FROM buyers WHERE id = ?").get(fresh.winner_buyer_id)?.name : null;
+      closed.push(lotSummary(fresh, winner));
     }
-    return results;
-  });
-  tx.immediate();
-  return getSessionView(db, sessionId, now);
+    return { closed, pending, alreadyClosed };
+  }).immediate();
+
+  if (summary.pending.length > 0) {
+    const pendingText = summary.pending.map(l => `${l.ringNo}（截拍时间 ${fmtCn(l.endsAt)}）`).join("、");
+    const closedText = summary.closed.length ? `已截拍 ${summary.closed.length} 件；` : "";
+    throw new AuctionError("lots_not_due",
+      `${closedText}${summary.pending.length} 件拍品未到截拍时间：${pendingText}`, 409, summary);
+  }
+  return { ...getSessionView(db, sessionId, now), closeSummary: summary };
 };
 
 /* ---------------- 结算（佣金 + 保证金，幂等不重复扣款） ---------------- */
@@ -255,10 +291,18 @@ export const settleSession = (db, sessionId, now) => {
 
 /* ---------------- 查询视图 ---------------- */
 
-export function sessionPhase(session, now) {
+/**
+ * 场次状态按所有拍品的实际截拍时间计算：
+ * 任一拍品因顺延而晚于场次原始截拍时间时，场次保持「进行中」直到最晚的拍品到点。
+ */
+export function sessionPhase(session, now, lots = []) {
   if (now < session.start_at) return "scheduled";
-  if (now < session.end_at) return "live";
-  return "ended";
+  let effectiveEnd = session.end_at;
+  for (const lot of lots) {
+    const endsAt = lot.ends_at ?? lot.endsAt;
+    if (endsAt && endsAt > effectiveEnd) effectiveEnd = endsAt;
+  }
+  return now < effectiveEnd ? "live" : "ended";
 }
 
 export function lotView(db, lot, now) {
@@ -294,8 +338,8 @@ export function lotView(db, lot, now) {
 
 export function getSessionView(db, sessionId, now) {
   const session = getSession(db, sessionId);
-  const lots = db.prepare("SELECT * FROM lots WHERE session_id = ? ORDER BY id").all(sessionId)
-    .map(lot => lotView(db, lot, now));
+  const lotRows = db.prepare("SELECT * FROM lots WHERE session_id = ? ORDER BY id").all(sessionId);
+  const lots = lotRows.map(lot => lotView(db, lot, now));
   const buyers = db.prepare("SELECT * FROM buyers WHERE session_id = ? ORDER BY id").all(sessionId)
     .map(b => ({ id: b.id, name: b.name, deposit: b.deposit, depositPaidAt: b.deposit_paid_at }));
   const ledger = db.prepare("SELECT * FROM ledger WHERE session_id = ? ORDER BY id").all(sessionId)
@@ -307,7 +351,7 @@ export function getSessionView(db, sessionId, now) {
     endAt: session.end_at,
     increment: session.increment,
     commissionRate: session.commission_rate,
-    phase: sessionPhase(session, now),
+    phase: sessionPhase(session, now, lotRows),
     lots,
     buyers,
     ledger
@@ -316,8 +360,9 @@ export function getSessionView(db, sessionId, now) {
 
 export function listSessions(db, now) {
   return db.prepare("SELECT * FROM sessions ORDER BY id DESC").all().map(session => {
-    const lots = db.prepare("SELECT status, COUNT(*) AS n FROM lots WHERE session_id = ? GROUP BY status").all(session.id);
+    const lotRows = db.prepare("SELECT status, ends_at FROM lots WHERE session_id = ?").all(session.id);
     const buyers = db.prepare("SELECT COUNT(*) AS n FROM buyers WHERE session_id = ?").get(session.id).n;
+    const count = status => lotRows.filter(row => row.status === status).length;
     return {
       id: session.id,
       name: session.name,
@@ -325,11 +370,11 @@ export function listSessions(db, now) {
       endAt: session.end_at,
       increment: session.increment,
       commissionRate: session.commission_rate,
-      phase: sessionPhase(session, now),
-      lotCount: lots.reduce((sum, row) => sum + row.n, 0),
-      openLots: lots.find(row => row.status === "open")?.n || 0,
-      soldLots: lots.find(row => row.status === "sold")?.n || 0,
-      unsoldLots: lots.find(row => row.status === "unsold")?.n || 0,
+      phase: sessionPhase(session, now, lotRows),
+      lotCount: lotRows.length,
+      openLots: count("open"),
+      soldLots: count("sold"),
+      unsoldLots: count("unsold"),
       buyerCount: buyers
     };
   });

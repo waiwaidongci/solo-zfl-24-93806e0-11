@@ -158,12 +158,12 @@ async function main() {
   await shot(page, "04-bidding");
 
   /* ---------- 5. 截拍前两分钟出价自动顺延 ---------- */
-  console.log("5) 两分钟自动顺延（等待进入截拍前 2 分钟窗口…）");
+  console.log("5) 两分钟自动顺延（等待进入截拍前 30 秒…）");
   while (true) {
     view = await api(`/api/auction/sessions/${sessionId}`);
     const lot = view.lots.find(l => l.id === lot1.id);
-    if (lot.endsAt - Date.now() <= 115_000) break;
-    await sleep(2000);
+    if (lot.endsAt - Date.now() <= 30_000) break; // 压到原截拍前 30 秒内出价，留出约 90 秒顺延窗口便于观察
+    await sleep(1000);
   }
   const beforeBid = Date.now();
   await bid(page, lot1.id, "张三", 1200);
@@ -176,6 +176,39 @@ async function main() {
   ok(`张三 1200 出价触发顺延，新截拍时间 ${new Date(extended.endsAt).toLocaleTimeString("zh-CN")}`);
   await page.waitForSelector(`text=已顺延 1 次`, { timeout: 8000 });
   await shot(page, "05-extended");
+
+  /* ---------- 5b. 场景一：原截拍时间已过、顺延窗口内，场次仍应显示进行中 ---------- */
+  console.log("5b) 场景一：原截拍时间过后场次状态仍为「进行中」");
+  const sessionEndAt = view.endAt;
+  while (Date.now() < sessionEndAt + 2000) await sleep(500); // 等过原截拍时间
+  assert.ok(Date.now() < extended.endsAt, "应仍处于顺延窗口内");
+  view = await api(`/api/auction/sessions/${sessionId}`);
+  assert.equal(view.phase, "live", "详情接口：原截拍时间过后场次应仍为进行中");
+  assert.equal(view.lots.find(l => l.id === lot1.id).biddable, true, "顺延窗口内拍品仍可出价");
+  const listed = await api("/api/auction/sessions");
+  assert.equal(listed.find(s => s.id === sessionId).phase, "live", "列表接口：场次应仍为进行中");
+  await page.waitForSelector("#sessions-table .pill.live", { timeout: 8000 });
+  assert.ok((await page.textContent("#sessions-table .pill.live")).includes("进行中"), "场次列表应显示进行中");
+  await page.waitForSelector("#session-detail h2 .pill.live", { timeout: 8000 });
+  ok("原截拍时间过后：列表与详情均显示「进行中」，拍品继续接受出价");
+  await shot(page, "05b-still-live-after-original-end");
+
+  /* ---------- 5c. 场景二：未到顺延后的截拍时间，截拍给出明确未完成反馈 ---------- */
+  console.log("5c) 场景二：未到顺延后截拍时间点击截拍 -> 明确反馈未完成");
+  await clearToast(page);
+  await page.click("#close-session-btn");
+  await expectToast(page, "未到截拍时间");
+  ok("界面提示「未到截拍时间」而非假成功");
+  const rawClose = await fetch(`${BASE}/api/auction/sessions/${sessionId}/close`, { method: "POST" });
+  assert.equal(rawClose.status, 409, "存在未到点拍品时接口应返回 409");
+  const rawBody = await rawClose.json();
+  assert.equal(rawBody.error, "lots_not_due");
+  assert.ok(rawBody.details.pending.some(l => l.ringNo === "CHN-2026-001"), "明细应指明未到点拍品");
+  view = await api(`/api/auction/sessions/${sessionId}`);
+  assert.equal(view.lots.find(l => l.id === lot1.id).status, "open", "未到点的 lot1 仍在竞价中");
+  assert.equal(view.lots.find(l => l.id === lot2.id).status, "unsold", "已到点的 lot2 被截拍（流拍）");
+  ok("409 + 明细反馈；到点拍品已截拍，未到点拍品保持竞价中");
+  await shot(page, "05c-close-not-due");
 
   /* ---------- 6. 并发截拍：只确定一个最高价 ---------- */
   console.log("6) 并发截拍（等待到点…）");
@@ -190,7 +223,8 @@ async function main() {
 
   await clearToast(page);
   await page.click("#close-session-btn");
-  await expectToast(page, "截拍完成");
+  await expectToast(page, "没有新的到点拍品");
+  ok("全部拍品已截拍后再点截拍：如实反馈「没有新的到点拍品」");
   view = await api(`/api/auction/sessions/${sessionId}`);
   assert.equal(view.lots.find(l => l.id === lot1.id).status, "sold");
   assert.equal(view.lots.find(l => l.id === lot1.id).winner, "张三");

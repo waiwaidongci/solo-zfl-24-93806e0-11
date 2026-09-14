@@ -286,6 +286,70 @@ test("结算：有拍品未到截拍时间 -> 整体拒绝且不留半笔流水"
   assert.equal(db.prepare("SELECT status FROM lots WHERE id = ?").get(lot.id).status, "open");
 });
 
+/* ================= 场次状态与截拍反馈（顺延场景） ================= */
+
+test("场次状态：顺延的拍品决定场次是否结束", () => {
+  const db = freshDb();
+  const { session, lot } = setupLive(db); // 场次 T0 ~ T0+600_000
+  registerBuyer(db, { sessionId: session.id, name: "张三", deposit: 2000 }, T0);
+  // 截拍前 30 秒出价 -> 顺延到 T0+600_000-30_000+120_000 = T0+690_000
+  placeBid(db, { lotId: lot.id, buyerName: "张三", amount: 1000 }, T0 + 570_000);
+
+  const duringExtension = T0 + 600_001; // 原截拍时间已过，顺延窗口内
+  assert.equal(listSessions(db, duringExtension)[0].phase, "live", "场次列表应显示进行中");
+  assert.equal(getSessionView(db, session.id, duringExtension).phase, "live", "场次详情应显示进行中");
+  assert.equal(getSessionView(db, session.id, duringExtension).lots[0].biddable, true, "顺延窗口内仍可出价");
+
+  const afterExtension = T0 + 690_001; // 顺延后的截拍时间也过了
+  assert.equal(listSessions(db, afterExtension)[0].phase, "ended");
+  assert.equal(getSessionView(db, session.id, afterExtension).phase, "ended");
+});
+
+test("截拍：部分到点 -> 到点的截拍、未到点的明确反馈（HTTP 409）", async () => {
+  const db = freshDb();
+  const { session, lot } = setupLive(db);
+  const lot2 = listLot(db, { sessionId: session.id, ringNo: "CHN-2022-188", consignor: "育种棚", startPrice: 500 }, T0);
+  registerBuyer(db, { sessionId: session.id, name: "张三", deposit: 2000 }, T0);
+  placeBid(db, { lotId: lot.id, buyerName: "张三", amount: 1000 }, T0 + 570_000); // lot1 顺延到 T0+690_000，lot2 仍是 T0+600_000
+
+  const server = createApp(db, () => T0 + 600_001); // lot2 到点，lot1 未到点
+  await new Promise(resolve => server.listen(0, resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const res = await fetch(`${base}/api/auction/sessions/${session.id}/close`, { method: "POST" });
+    assert.equal(res.status, 409, "有未到点拍品时不能返回成功");
+    const body = await res.json();
+    assert.equal(body.error, "lots_not_due");
+    assert.ok(body.message.includes("CHN-2026-001"), "提示要指明未到点拍品");
+    assert.equal(body.details.pending.length, 1);
+    assert.equal(body.details.pending[0].ringNo, "CHN-2026-001");
+    assert.equal(body.details.closed.length, 1, "到点的 lot2 应被截拍");
+    assert.equal(body.details.closed[0].status, "unsold");
+    assert.equal(db.prepare("SELECT status FROM lots WHERE id = ?").get(lot2.id).status, "unsold");
+    assert.equal(db.prepare("SELECT status FROM lots WHERE id = ?").get(lot.id).status, "open", "未到点的 lot1 仍是竞价中");
+  } finally {
+    server.close();
+  }
+
+  // 全部到点后 -> 成功并带截拍明细
+  const server2 = createApp(db, () => T0 + 690_001);
+  await new Promise(resolve => server2.listen(0, resolve));
+  const base2 = `http://127.0.0.1:${server2.address().port}`;
+  try {
+    const res = await fetch(`${base2}/api/auction/sessions/${session.id}/close`, { method: "POST" });
+    assert.equal(res.status, 200);
+    const view = await res.json();
+    assert.equal(view.closeSummary.closed.length, 1);
+    assert.equal(view.closeSummary.closed[0].status, "sold");
+    assert.equal(view.closeSummary.closed[0].hammerPrice, 1000);
+    assert.equal(view.closeSummary.closed[0].winner, "张三");
+    assert.equal(view.closeSummary.alreadyClosed.length, 1, "lot2 此前已截拍");
+    assert.equal(view.lots.every(l => l.status !== "open"), true);
+  } finally {
+    server2.close();
+  }
+});
+
 /* ================= 持久化 ================= */
 
 test("持久化：关闭重开数据库后拍卖数据仍可查询", () => {
